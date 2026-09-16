@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Classroom Availability Dashboard</title>
+<style>
+  :root {
+    --green: #22c55e;
+    --red: #ef4444;
+    --grey: #9ca3af;
+    --bg: #0f172a;
+    --card-bg: #1e293b;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  h1 { font-size: 1.6rem; font-weight: 700; }
+  .clock { color: var(--muted); font-size: 0.95rem; }
+  .floor-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  .floor-tabs button {
+    background: var(--card-bg);
+    color: var(--text);
+    border: 1px solid #334155;
+    padding: 8px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.95rem;
+  }
+  .floor-tabs button.active {
+    background: #4f46e5;
+    border-color: #4f46e5;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 16px;
+  }
+  .room-card {
+    background: var(--card-bg);
+    border-radius: 14px;
+    padding: 20px;
+    border-left: 6px solid var(--grey);
+    position: relative;
+    overflow: hidden;
+  }
+  .room-card.free { border-left-color: var(--green); }
+  .room-card.busy { border-left-color: var(--red); }
+  .room-name { font-size: 1.3rem; font-weight: 700; margin-bottom: 4px; }
+  .room-type { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+  .status-pill {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .free .status-pill { background: rgba(34,197,94,0.15); color: var(--green); }
+  .busy .status-pill { background: rgba(239,68,68,0.15); color: var(--red); }
+  .not-bookable .status-pill { background: rgba(148,163,184,0.15); color: var(--grey); }
+  .detail { color: var(--muted); font-size: 0.85rem; margin-top: 8px; }
+  .loading { color: var(--muted); padding: 40px; text-align: center; }
+
+  /* DOOR SCREEN MODE */
+  body.door-mode {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .door-card {
+    width: 100%;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    transition: background 0.4s ease;
+  }
+  .door-card.free { background: linear-gradient(160deg, #16a34a, #052e16); }
+  .door-card.busy { background: linear-gradient(160deg, #dc2626, #450a0a); }
+  .door-room-name { font-size: 5rem; font-weight: 800; margin-bottom: 12px; }
+  .door-status { font-size: 3rem; font-weight: 700; letter-spacing: 0.05em; }
+  .door-time { margin-top: 24px; font-size: 1.2rem; opacity: 0.8; }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div class="loading">Loading room status…</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // ====== CONFIG - fill these in from your Supabase project settings ======
+  const SUPABASE_URL = "https://wsjlhuaydtjldbglxghe.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndzamxodWF5ZHRqbGRiZ2x4Z2hlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY5ODgzMjYsImV4cCI6MjEwMjU2NDMyNn0.-73CCcThBXRpKeC-c8Qohcriajethf2FgbfONraNnfg";
+  // ==========================================================================
+
+  const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const REFRESH_MS = 15000; // 15s local refresh, zero n8n cost
+
+  const params = new URLSearchParams(window.location.search);
+  const doorRoom = params.get('room'); // e.g. ?room=DT-101 => door screen mode
+
+  let activeFloor = 1;
+
+  function timeNow() {
+    const d = new Date();
+    return d.toTimeString().slice(0,8); // HH:MM:SS
+  }
+
+  function timeToMinutes(t) {
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  }
+
+  async function fetchData() {
+    const today = new Date();
+    const todayDate = today.toISOString().split('T')[0];
+    const dayOfWeek = DAY_NAMES[today.getDay()];
+
+    const [{ data: rooms, error: e1 }, { data: timetable, error: e2 }, { data: bookings, error: e3 }] =
+      await Promise.all([
+        supabaseClient.from('rooms').select('*'),
+        supabaseClient.from('regular_timetable').select('*').eq('day_of_week', dayOfWeek),
+        supabaseClient.from('bookings').select('*').eq('date', todayDate)
+      ]);
+
+    if (e1 || e2 || e3) {
+      console.error(e1 || e2 || e3);
+      return null;
+    }
+    return { rooms, timetable, bookings };
+  }
+
+  function computeStatus(room, timetable, bookings, nowMins) {
+    const inSlot = (start, end) => {
+      const s = timeToMinutes(start.slice(0,5));
+      const e = timeToMinutes(end.slice(0,5));
+      return nowMins >= s && nowMins < e;
+    };
+
+    const busyByClass = timetable.some(t => t.room_id === room.room_id && inSlot(t.start_time, t.end_time));
+    if (busyByClass) return { busy: true, reason: 'Regular Class' };
+
+    const activeBooking = bookings.find(b => b.room_id === room.room_id && inSlot(b.start_time, b.end_time));
+    if (activeBooking) return { busy: true, reason: `Booked by ${activeBooking.booked_by}` };
+
+    return { busy: false, reason: null };
+  }
+
+  function renderDashboard(data) {
+    const nowMins = timeToMinutes(timeNow());
+    const floorRooms = data.rooms.filter(r => r.floor === activeFloor).sort((a,b) => a.room_id.localeCompare(b.room_id));
+
+    const cards = floorRooms.map(room => {
+      const status = computeStatus(room, data.timetable, data.bookings, nowMins);
+      let cls, label;
+      if (!room.bookable) {
+        cls = 'not-bookable';
+        label = room.room_type.replace('_', ' ');
+      } else if (status.busy) {
+        cls = 'busy';
+        label = 'Occupied';
+      } else {
+        cls = 'free';
+        label = 'Available';
+      }
+
+      return `
+        <div class="room-card ${cls}">
+          <div class="room-name">${room.room_id}</div>
+          <div class="room-type">${room.room_type.replace('_',' ')}</div>
+          <span class="status-pill">${label}</span>
+          ${status.busy ? `<div class="detail">${status.reason}</div>` : ''}
+        </div>
+      `;
+    }).join('');
+
+    document.getElementById('app').innerHTML = `
+      <header>
+        <h1>🏫 Classroom Availability — Live</h1>
+        <div class="clock">${new Date().toLocaleTimeString()} · ${DAY_NAMES[new Date().getDay()]}</div>
+      </header>
+      <div class="floor-tabs">
+        <button class="${activeFloor === 1 ? 'active' : ''}" onclick="setFloor(1)">1st Floor</button>
+        <button class="${activeFloor === 2 ? 'active' : ''}" onclick="setFloor(2)">2nd Floor</button>
+        <button class="${activeFloor === 3 ? 'active' : ''}" onclick="setFloor(3)">3rd Floor</button>
+      </div>
+      <div class="grid">${cards}</div>
+    `;
+  }
+
+  function renderDoorScreen(data) {
+    const nowMins = timeToMinutes(timeNow());
+    const room = data.rooms.find(r => r.room_id === doorRoom);
+    if (!room) {
+      document.getElementById('app').innerHTML = `<div class="loading">Room "${doorRoom}" not found</div>`;
+      return;
+    }
+    const status = computeStatus(room, data.timetable, data.bookings, nowMins);
+    const cls = status.busy ? 'busy' : 'free';
+    const label = status.busy ? 'OCCUPIED' : 'AVAILABLE';
+
+    document.body.className = 'door-mode';
+    document.getElementById('app').innerHTML = `
+      <div class="door-card ${cls}">
+        <div class="door-room-name">${room.room_id}</div>
+        <div class="door-status">${label}</div>
+        ${status.busy ? `<div class="door-time">${status.reason}</div>` : ''}
+        <div class="door-time">${new Date().toLocaleTimeString()}</div>
+      </div>
+    `;
+  }
+
+  window.setFloor = function(floor) {
+    activeFloor = floor;
+    refresh();
+  };
+
+  async function refresh() {
+    const data = await fetchData();
+    if (!data) return;
+    if (doorRoom) {
+      renderDoorScreen(data);
+    } else {
+      renderDashboard(data);
+    }
+  }
+
+  refresh();
+  setInterval(refresh, REFRESH_MS);
+</script>
+
+</body>
+</html>
